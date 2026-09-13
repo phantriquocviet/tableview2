@@ -42,6 +42,8 @@ class TableView2 extends StatefulWidget {
     this.filterIcon,
     this.widgetTextHeader,
     this.headingTextStyle,
+    this.rowHoverColor = const Color(0x0A000000),
+    this.rowSelectedColor = const Color(0x1A448AFF),
   });
   final Widget? empty;
   final String? emptyMessage;
@@ -71,6 +73,8 @@ class TableView2 extends StatefulWidget {
   final double resizeHandleHeight;
   final double minDataRowHeight;
   final double maxDataRowHeight;
+  final Color rowHoverColor;
+  final Color rowSelectedColor;
 
   @override
   State<TableView2> createState() => _TableView2State();
@@ -137,10 +141,12 @@ class _TableView2State extends State<TableView2> {
   late final ScrollController _verticalScrollController;
   late final ValueNotifier<ScrollMetrics?> _horizontalMetricsNotifier;
   late final ValueNotifier<ScrollMetrics?> _verticalMetricsNotifier;
+  final _RowHighlightController _rowHighlight = _RowHighlightController();
   String? _resizingColumnKey;
   double _resizeStartWidth = 0;
   bool _isResizingRowHeight = false;
   int? _resizingDataRowIndex;
+  double? _lastHoverLocalDy;
 
   /// Session-only per-row heights, keyed by data row index.
   final Map<int, double> _localDataRowHeights = {};
@@ -162,12 +168,18 @@ class _TableView2State extends State<TableView2> {
     _verticalScrollController = ScrollController();
     _horizontalMetricsNotifier = ValueNotifier<ScrollMetrics?>(null);
     _verticalMetricsNotifier = ValueNotifier<ScrollMetrics?>(null);
+    _verticalScrollController.addListener(_recomputeHoveredRowFromPointer);
+    _rowHighlight.syncSelected(_selectedRowIndices());
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncInitialMetrics());
   }
 
   @override
   void didUpdateWidget(covariant TableView2 oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _rowHighlight.syncSelected(_selectedRowIndices());
+    if (_rowHighlight.hovered >= widget.rows.length) {
+      _setHoveredRow(-1);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncInitialMetrics());
   }
 
@@ -201,10 +213,12 @@ class _TableView2State extends State<TableView2> {
 
   @override
   void dispose() {
+    _verticalScrollController.removeListener(_recomputeHoveredRowFromPointer);
     _horizontalScrollController.dispose();
     _verticalScrollController.dispose();
     _horizontalMetricsNotifier.dispose();
     _verticalMetricsNotifier.dispose();
+    _rowHighlight.dispose();
     super.dispose();
   }
 
@@ -251,63 +265,74 @@ class _TableView2State extends State<TableView2> {
         );
         final table = Padding(
           padding: const EdgeInsets.only(bottom: 14),
-          child: NotificationListener<ScrollNotification>(
-            onNotification: (notification) {
-              _applyScrollMetricsForScrollbar(notification.metrics);
-              return false;
+          child: MouseRegion(
+            opaque: false,
+            onHover: (event) {
+              _lastHoverLocalDy = event.localPosition.dy;
+              _setHoveredRow(_dataRowIndexFromLocalDy(event.localPosition.dy));
             },
-            child: ScrollConfiguration(
-              behavior: ScrollConfiguration.of(context).copyWith(
-                scrollbars: false,
-                dragDevices: {
-                  PointerDeviceKind.touch,
-                  PointerDeviceKind.mouse,
-                  PointerDeviceKind.trackpad,
-                },
-              ),
-              child: TableView.builder(
-                horizontalDetails: ScrollableDetails.horizontal(
-                  controller: _horizontalScrollController,
-                ).copyWith(physics: const ClampingScrollPhysics()),
-                verticalDetails: ScrollableDetails.vertical(
-                  controller: _verticalScrollController,
-                ).copyWith(physics: const ClampingScrollPhysics()),
-                rowCount: rowCount,
-                columnCount: totalColumns,
-                pinnedRowCount: widget.fixedRowCount,
-                cellBuilder: (context, vicinity) =>
-                    _buildCell(context, vicinity),
-                pinnedColumnCount: widget.listViewConfig.fixedLeftColumns,
-                columnBuilder: (int index) => TableSpan(
-                  extent: FixedTableSpanExtent(_getColumnWidth(index)),
-                  foregroundDecoration: TableSpanDecoration(
-                    border: TableSpanBorder(
-                      leading: index == 0
-                          ? const BorderSide(color: Colors.grey, width: 0.4)
-                          : BorderSide.none,
-                      trailing: const BorderSide(
-                        color: Colors.grey,
-                        width: 0.4,
+            onExit: (_) {
+              _lastHoverLocalDy = null;
+              _setHoveredRow(-1);
+            },
+            child: NotificationListener<ScrollNotification>(
+              onNotification: (notification) {
+                _applyScrollMetricsForScrollbar(notification.metrics);
+                return false;
+              },
+              child: ScrollConfiguration(
+                behavior: ScrollConfiguration.of(context).copyWith(
+                  scrollbars: false,
+                  dragDevices: {
+                    PointerDeviceKind.touch,
+                    PointerDeviceKind.mouse,
+                    PointerDeviceKind.trackpad,
+                  },
+                ),
+                child: TableView.builder(
+                  horizontalDetails: ScrollableDetails.horizontal(
+                    controller: _horizontalScrollController,
+                  ).copyWith(physics: const ClampingScrollPhysics()),
+                  verticalDetails: ScrollableDetails.vertical(
+                    controller: _verticalScrollController,
+                  ).copyWith(physics: const ClampingScrollPhysics()),
+                  rowCount: rowCount,
+                  columnCount: totalColumns,
+                  pinnedRowCount: widget.fixedRowCount,
+                  cellBuilder: (context, vicinity) =>
+                      _buildCell(context, vicinity),
+                  pinnedColumnCount: widget.listViewConfig.fixedLeftColumns,
+                  columnBuilder: (int index) => TableSpan(
+                    extent: FixedTableSpanExtent(_getColumnWidth(index)),
+                    foregroundDecoration: TableSpanDecoration(
+                      border: TableSpanBorder(
+                        leading: index == 0
+                            ? const BorderSide(color: Colors.grey, width: 0.4)
+                            : BorderSide.none,
+                        trailing: const BorderSide(
+                          color: Colors.grey,
+                          width: 0.4,
+                        ),
                       ),
                     ),
                   ),
-                ),
-                rowBuilder: (int index) => TableSpan(
-                  extent: FixedTableSpanExtent(
-                    index < widget.fixedRowCount
-                        ? widget.headingRowHeight
-                        : _effectiveDataRowHeightAt(
-                            index - widget.fixedRowCount,
-                          ),
-                  ),
-                  foregroundDecoration: TableSpanDecoration(
-                    border: TableSpanBorder(
-                      leading: index == 0
-                          ? const BorderSide(color: Colors.grey, width: 0.4)
-                          : BorderSide.none,
-                      trailing: const BorderSide(
-                        color: Colors.grey,
-                        width: 0.4,
+                  rowBuilder: (int index) => TableSpan(
+                    extent: FixedTableSpanExtent(
+                      index < widget.fixedRowCount
+                          ? widget.headingRowHeight
+                          : _effectiveDataRowHeightAt(
+                              index - widget.fixedRowCount,
+                            ),
+                    ),
+                    foregroundDecoration: TableSpanDecoration(
+                      border: TableSpanBorder(
+                        leading: index == 0
+                            ? const BorderSide(color: Colors.grey, width: 0.4)
+                            : BorderSide.none,
+                        trailing: const BorderSide(
+                          color: Colors.grey,
+                          width: 0.4,
+                        ),
                       ),
                     ),
                   ),
@@ -420,22 +445,19 @@ class _TableView2State extends State<TableView2> {
           onTap: () => row.onTap?.call(),
           onSecondaryTapDown: (details) =>
               row.onSecondaryTapDown?.call(details),
-          onDoubleTap: () {
-            if (row.onDoubleTap != null) {
-              row.onDoubleTap!.call();
-            } else {
-              row.onSelectChanged?.call(!row.isChecked);
-            }
-          },
+          onDoubleTap: row.onDoubleTap,
           onLongPress: () => row.onLongPress?.call(),
-          child: Container(
-            color: row.selected
-                ? Colors.blueAccent.withValues(alpha: 0.1)
-                : Colors.transparent,
-            alignment: isAlignCenter ? Alignment.center : Alignment.centerLeft,
-            child: _wrapDataCellWithRowResizeHandle(
-              dataRowIndex: dataRow,
-              child: dataChild,
+          child: _wrapRowHighlight(
+            dataRowIndex: dataRow,
+            idleColor: Colors.transparent,
+            child: Container(
+              alignment: isAlignCenter
+                  ? Alignment.center
+                  : Alignment.centerLeft,
+              child: _wrapDataCellWithRowResizeHandle(
+                dataRowIndex: dataRow,
+                child: dataChild,
+              ),
             ),
           ),
         ),
@@ -499,7 +521,13 @@ class _TableView2State extends State<TableView2> {
             value: allSelected,
             tristate: true,
             onChanged: (value) {
-              widget.onSelectAll?.call(value ?? false);
+              final checked = value ?? false;
+              if (checked) {
+                _rowHighlight.selectAll(widget.rows.length);
+              } else {
+                _rowHighlight.clearSelected();
+              }
+              widget.onSelectAll?.call(checked);
             },
           ),
         ),
@@ -515,34 +543,39 @@ class _TableView2State extends State<TableView2> {
     return TableViewCell(
       child: _wrapDataCellWithRowResizeHandle(
         dataRowIndex: dataRowIndex,
-        child: Container(
-          color: row.selected
-              ? Colors.blueAccent.withValues(alpha: 0.1)
-              : Colors.white,
-          alignment: Alignment.center,
-          padding: const EdgeInsets.all(8),
-          child: CheckboxTheme(
-            data: row.enableCheckbox
-                ? TableView2.checkboxTheme(context)
-                : TableView2.checkboxTheme(context).copyWith(
-                    fillColor: WidgetStateProperty.resolveWith<Color>((states) {
-                      if (states.contains(WidgetState.selected)) {
-                        return Colors.grey;
+        child: _wrapRowHighlight(
+          dataRowIndex: dataRowIndex,
+          idleColor: Colors.white,
+          child: Container(
+            alignment: Alignment.center,
+            padding: const EdgeInsets.all(8),
+            child: CheckboxTheme(
+              data: row.enableCheckbox
+                  ? TableView2.checkboxTheme(context)
+                  : TableView2.checkboxTheme(context).copyWith(
+                      fillColor: WidgetStateProperty.resolveWith<Color>((
+                        states,
+                      ) {
+                        if (states.contains(WidgetState.selected)) {
+                          return Colors.grey;
+                        }
+                        return Colors.transparent;
+                      }),
+                      checkColor: const WidgetStatePropertyAll(Colors.white),
+                      side: WidgetStateBorderSide.resolveWith((states) {
+                        return const BorderSide(color: Colors.grey, width: 1);
+                      }),
+                    ),
+              child: Checkbox(
+                value: row.enableCheckbox ? row.isChecked : true,
+                onChanged: row.enableCheckbox
+                    ? (value) {
+                        final checked = value ?? false;
+                        _rowHighlight.setSelected(dataRowIndex, checked);
+                        row.onSelectChanged?.call(checked);
                       }
-                      return Colors.transparent;
-                    }),
-                    checkColor: const WidgetStatePropertyAll(Colors.white),
-                    side: WidgetStateBorderSide.resolveWith((states) {
-                      return const BorderSide(color: Colors.grey, width: 1);
-                    }),
-                  ),
-            child: Checkbox(
-              value: row.enableCheckbox ? row.isChecked : true,
-              onChanged: row.enableCheckbox
-                  ? (value) {
-                      row.onSelectChanged?.call(value ?? false);
-                    }
-                  : null,
+                    : null,
+              ),
             ),
           ),
         ),
@@ -557,6 +590,71 @@ class _TableView2State extends State<TableView2> {
     if (selectedCount == 0) return false;
     if (selectedCount == widget.rows.length) return true;
     return null; // Indeterminate state
+  }
+
+  Set<int> _selectedRowIndices() {
+    final selected = <int>{};
+    for (var i = 0; i < widget.rows.length; i++) {
+      if (widget.rows[i].selected) selected.add(i);
+    }
+    return selected;
+  }
+
+  void _setHoveredRow(int index) {
+    final clamped = (index >= 0 && index < widget.rows.length) ? index : -1;
+    final previous = _rowHighlight.hovered;
+    if (previous == clamped) return;
+    _rowHighlight.setHovered(clamped);
+    widget.hoveredIndexNotifier?.value = clamped;
+    if (previous >= 0 && previous < widget.rows.length) {
+      widget.rows[previous].onHover?.call(false);
+    }
+    if (clamped >= 0) {
+      widget.rows[clamped].onHover?.call(true);
+    }
+  }
+
+  void _recomputeHoveredRowFromPointer() {
+    final dy = _lastHoverLocalDy;
+    if (dy == null) return;
+    _setHoveredRow(_dataRowIndexFromLocalDy(dy));
+  }
+
+  int _dataRowIndexFromLocalDy(double localDy) {
+    final headerHeight = widget.headingRowHeight * widget.fixedRowCount;
+    if (localDy < headerHeight) return -1;
+    final scrollOffset = _verticalScrollController.hasClients
+        ? _verticalScrollController.offset
+        : 0.0;
+    var y = localDy - headerHeight + scrollOffset;
+    if (y < 0) return -1;
+    if (_localDataRowHeights.isEmpty) {
+      final index = y ~/ widget.dataRowHeight;
+      if (index < 0 || index >= widget.rows.length) return -1;
+      return index;
+    }
+    for (var i = 0; i < widget.rows.length; i++) {
+      final height = _effectiveDataRowHeightAt(i);
+      if (y < height) return i;
+      y -= height;
+    }
+    return -1;
+  }
+
+  Widget _wrapRowHighlight({
+    required int dataRowIndex,
+    required Color idleColor,
+    required Widget child,
+  }) {
+    return _RowHighlightBackground(
+      controller: _rowHighlight,
+      rowIndex: dataRowIndex,
+      idleColor: idleColor,
+      hoverColor: widget.rowHoverColor,
+      selectedColor: widget.rowSelectedColor,
+      onEnter: () => _setHoveredRow(dataRowIndex),
+      child: child,
+    );
   }
 
   /// Drag the bottom border of a data row to change that row's height only.
@@ -889,5 +987,125 @@ class _TableView2State extends State<TableView2> {
       width += _getColumnWidth(i);
     }
     return width;
+  }
+}
+
+/// Notifies only the rows whose hover/selected highlight actually changed.
+class _RowHighlightController {
+  int hovered = -1;
+  final Set<int> _selected = {};
+  final Map<int, ValueNotifier<int>> _tokens = {};
+
+  ValueNotifier<int> tokenFor(int rowIndex) {
+    return _tokens.putIfAbsent(rowIndex, () => ValueNotifier<int>(0));
+  }
+
+  bool isHovered(int rowIndex) => rowIndex == hovered;
+
+  bool isSelected(int rowIndex) => _selected.contains(rowIndex);
+
+  void setHovered(int index) {
+    if (hovered == index) return;
+    final previous = hovered;
+    hovered = index;
+    _bump(previous);
+    _bump(index);
+  }
+
+  void setSelected(int index, bool selected) {
+    final changed = selected ? _selected.add(index) : _selected.remove(index);
+    if (changed) _bump(index);
+  }
+
+  void selectAll(int rowCount) {
+    for (var i = 0; i < rowCount; i++) {
+      if (_selected.add(i)) _bump(i);
+    }
+  }
+
+  void clearSelected() {
+    if (_selected.isEmpty) return;
+    final previous = List<int>.of(_selected);
+    _selected.clear();
+    for (final index in previous) {
+      _bump(index);
+    }
+  }
+
+  void syncSelected(Set<int> selected) {
+    if (_selected.length == selected.length &&
+        _selected.containsAll(selected)) {
+      return;
+    }
+    final toNotify = <int>{};
+    for (final index in _selected) {
+      if (!selected.contains(index)) toNotify.add(index);
+    }
+    for (final index in selected) {
+      if (!_selected.contains(index)) toNotify.add(index);
+    }
+    _selected
+      ..clear()
+      ..addAll(selected);
+    for (final index in toNotify) {
+      _bump(index);
+    }
+  }
+
+  void _bump(int index) {
+    if (index < 0) return;
+    final token = _tokens[index];
+    if (token != null) token.value++;
+  }
+
+  void dispose() {
+    for (final token in _tokens.values) {
+      token.dispose();
+    }
+    _tokens.clear();
+  }
+}
+
+class _RowHighlightBackground extends StatelessWidget {
+  const _RowHighlightBackground({
+    required this.controller,
+    required this.rowIndex,
+    required this.idleColor,
+    required this.hoverColor,
+    required this.selectedColor,
+    required this.onEnter,
+    required this.child,
+  });
+
+  final _RowHighlightController controller;
+  final int rowIndex;
+  final Color idleColor;
+  final Color hoverColor;
+  final Color selectedColor;
+  final VoidCallback onEnter;
+  final Widget child;
+
+  Color _colorForRow() {
+    if (controller.isSelected(rowIndex)) return selectedColor;
+    if (controller.isHovered(rowIndex)) return hoverColor;
+    return idleColor;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      opaque: false,
+      onEnter: (_) => onEnter(),
+      child: ValueListenableBuilder<int>(
+        valueListenable: controller.tokenFor(rowIndex),
+        builder: (context, _, child) {
+          return ColoredBox(
+            color: _colorForRow(),
+            child: SizedBox.expand(child: child),
+          );
+        },
+        child: child,
+      ),
+    );
   }
 }
